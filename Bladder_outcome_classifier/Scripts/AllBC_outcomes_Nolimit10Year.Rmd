@@ -1,0 +1,189 @@
+---
+title: "AllBC_outcomes"
+author: "Ji-Qing Chen"
+date: "9/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(survival)
+library(survminer)
+library(stargazer)
+```
+
+# load data
+```{r}
+load("/Users/chenjiqing/Public/bladder cancer/Basic Analysis/data_clean2.RData")
+rm(Recu,phenotype1)
+
+# load extended immune
+load("/Users/chenjiqing/Public/bladder cancer/Extended Deconvolution/Bladder_Extended_cell_proportion.RData")
+```
+
+# clean data
+```{r}
+phenotype2 <- phenotype2 %>% mutate(RecurYN2 = ifelse(RecurYN=='yes','yes','no'),
+                                    ProgressYN2 = ifelse(ProgressYN== 'yes','yes','no'))
+phenotype2$RecurYN2[which(is.na(phenotype2$RecurYN2) == T)] <- ''
+phenotype2$ProgressYN2[which(is.na(phenotype2$ProgressYN2) == T)] <- ''
+phenotype2 <- phenotype2 %>% 
+              mutate(Outcome = ifelse(RecurYN2 =="yes"|
+                                      ProgressYN2 =="yes"|
+                                      ddstat=="dead","yes","no")) %>%
+              mutate(Outcome = ifelse(Outcome=="yes",1,0),
+                     Death = ifelse(ddstat == "dead",1,0)) %>%
+              mutate(OutcomeTime = ifelse(RecurYN2 =="yes", 
+                                          recsurgtmd,survreftmd)) %>%
+              mutate(OutcomeTime = ifelse(RecurYN2 =="no"&
+                                           ProgressYN2 =="yes",
+                                           progearlydxtmd,OutcomeTime))
+# weird data
+weird = phenotype2[which(phenotype2$ddstat=="dead" & phenotype2$RecurYN2=="yes" &
+                         phenotype2$survreftmd<phenotype2$recsurgtmd),]
+weird2 = weird %>% select(survreftmd,survearlydxtmd,blood_collect_age_early,blood_collect_age_ref)
+
+# remove weird data
+phenotype3_0 <- phenotype2 %>% filter(Sample_Name != weird$Sample_Name)
+
+phenotype3 <- phenotype3_0 %>%
+          mutate(SurgToBlood2 = SurgToBlood/365) %>%
+          mutate(SurgToBlood3 = ifelse(SurgToBlood2<0.5,"<6month",
+          ifelse(SurgToBlood2<1,"6month<=x<1year",
+          ifelse(SurgToBlood2<2,"1year<=x<2year",
+          ifelse(SurgToBlood2<3,"2year<=x<3year",">3year")))))%>%
+          dplyr::select(Sample_Name,refage,sex,grade2,smkstat2,Death,survreftmd,
+                 ImmunoTx,Outcome,OutcomeTime,SurgToBlood,SurgToBlood3,muscinv,TenDead,TenRFS) %>%
+          left_join(Cell_Type_Est) %>%
+          # in case -1e-20 in some cell proportion
+          mutate(Bas = round(Bas*100,2),Bmem = round(Bmem*100,2),
+                 Bnv = round(Bnv*100,2),CD4mem = round(CD4mem*100,2),
+                 CD4nv = round(CD4nv*100,2),CD8mem = round(CD8mem*100,2),
+                 CD8nv = round(CD8nv*100,2),Eos = round(Eos*100,2),
+                 Mono = round(Mono*100,2),Neu = round(Neu*100,2),
+                 NK = round(NK*100,2),Treg = round(Treg*100,2)) %>%
+          mutate(CD4 = CD4mem + CD4nv,
+                 CD8 = CD8mem + CD8nv,
+                 Bcell = Bmem + Bnv,
+                 MemT = CD4mem + CD8mem,
+                 MemAll = CD4mem + CD8mem + Bmem,
+                 NvT = CD4nv + CD8nv,
+                 NvAll = CD4nv + CD8nv + Bnv) %>%
+          mutate(T_cell = CD4mem + CD4nv + CD8mem + CD8nv + Treg,
+                 Lymph = Bmem + Bnv + NK + T_cell,
+                 CD4T =  CD4mem + CD4nv + Treg) %>%
+          mutate(Lymph2 = ifelse(Lymph == 0, Lymph+0.01, Lymph),
+                 CD8T2 = ifelse(CD8 == 0, CD8+0.01, CD8),
+                 CD4nv2 = ifelse(CD4nv == 0, CD4nv+0.01, CD4nv),
+                 CD8nv2 = ifelse(CD8nv == 0, CD8nv+0.01,CD8nv)) %>%
+          mutate(NLR = ifelse(Neu/Lymph2 == Inf|Neu/Lymph2 == -Inf,
+                              NA, Neu/Lymph2),
+                 MLR = ifelse(Mono/Lymph2 == Inf|Mono/Lymph2 == -Inf,
+                              NA, Mono/Lymph2),
+                 CD4_to_8 = CD4T/CD8T2,
+                 CD4_to_8 = ifelse(CD4_to_8 == Inf|CD4_to_8 == -Inf,
+                                   NA, CD4_to_8),
+                 CD4mem_to_nv = ifelse(CD4mem/CD4nv2 == Inf|CD4mem/CD4nv2 == -Inf, 
+                                       NA, CD4mem/CD4nv2),
+                 CD8mem_to_nv = ifelse(CD8mem/CD8nv2 == Inf|CD8mem/CD8nv2 == -Inf, 
+                                       NA, CD8mem/CD8nv2),
+                 Tmem_to_nv = ifelse((CD8nv+CD4nv) == 0,
+                                  (CD8mem+CD4mem)/0.01,
+                                  (CD8mem+CD4mem)/(CD8nv+CD4nv)))
+
+phenotype3$SurgToBlood3 <- factor(phenotype3$SurgToBlood3, levels = c("<6month","6month<=x<1year","1year<=x<2year","2year<=x<3year",">3year"))
+phenotype3$SurgToBlood3 = relevel(phenotype3$SurgToBlood3, ref = "<6month")
+
+
+# Winsorization
+phenotype3_2 <- phenotype3 %>%
+         mutate(Bas2 = ifelse(Bas <= quantile(phenotype3$Bas, probs = 0.98),
+                              Bas,quantile(phenotype3$Bas, probs = 0.98)),
+                Bmem2 = ifelse(Bmem <= quantile(phenotype3$Bmem, probs = 0.98),
+                               Bmem,quantile(phenotype3$Bmem, probs = 0.98)),
+                Bnv2 = ifelse(Bnv <= quantile(phenotype3$Bnv, probs = 0.98),
+                              Bnv,quantile(phenotype3$Bnv, probs = 0.98)),
+                CD4mem2 = ifelse(CD4mem <= quantile(phenotype3$CD4mem, probs = 0.98),
+                                 CD4mem,quantile(phenotype3$CD4mem, probs = 0.98)),
+                CD4nv2 = ifelse(CD4nv <= quantile(phenotype3$CD4nv, probs = 0.98),
+                                CD4nv,quantile(phenotype3$CD4nv, probs = 0.98)),
+                CD8mem2 = ifelse(CD8mem <= quantile(phenotype3$CD8mem, probs = 0.98),
+                                 CD8mem,quantile(phenotype3$CD8mem, probs = 0.98)),
+                CD8nv2 = ifelse(CD8nv <= quantile(phenotype3$CD8nv, probs = 0.98),
+                                CD8nv,quantile(phenotype3$CD8nv, probs = 0.98)),
+                Eos2 = ifelse(Eos <= quantile(phenotype3$Eos, probs = 0.98),
+                              Eos,quantile(phenotype3$Eos, probs = 0.98)),
+                Mono2 = ifelse(Mono <= quantile(phenotype3$Mono, probs = 0.98),
+                               Mono,quantile(phenotype3$Mono, probs = 0.98)),
+                Neu2 = ifelse(Neu <= quantile(phenotype3$Neu, probs = 0.02),
+                              quantile(phenotype3$Neu, probs = 0.02),Neu),
+                NK2 = ifelse(NK <= quantile(phenotype3$NK, probs = 0.98),
+                             NK,quantile(phenotype3$NK, probs = 0.98)),
+                Treg2 = ifelse(Treg <= quantile(phenotype3$Treg, probs = 0.98),
+                               Treg,quantile(phenotype3$Treg, probs = 0.98)))
+
+NLR_win = quantile(phenotype3$NLR[!is.na(phenotype3$NLR)], probs = 0.98)
+MLR_win = quantile(phenotype3$MLR[!is.na(phenotype3$MLR)], probs = 0.98)
+CD4_to_8_win = quantile(phenotype3$CD4_to_8[!is.na(phenotype3$CD4_to_8)], 
+                        probs = 0.98)
+CD4mem_to_nv_win = quantile(phenotype3$CD4mem_to_nv[!is.na(phenotype3$CD4mem_to_nv)], 
+                            probs = 0.98)
+CD8mem_to_nv_win = quantile(phenotype3$CD8mem_to_nv[!is.na(phenotype3$CD8mem_to_nv)], 
+                            probs = 0.98)
+Tmem_to_nv_win = quantile(phenotype3$Tmem_to_nv[!is.na(phenotype3$Tmem_to_nv)], 
+                          probs = 0.98)
+
+phenotype4 <- phenotype3_2 %>%
+          mutate(NLR = ifelse(NLR <= NLR_win,NLR,NLR_win),
+                 MLR = ifelse(MLR <= MLR_win,MLR,MLR_win),
+                 CD4_to_8 = ifelse(CD4_to_8 <= CD4_to_8_win,CD4_to_8,CD4_to_8_win),
+                 CD4mem_to_nv = ifelse(CD4mem_to_nv <= CD4mem_to_nv_win,
+                                       CD4mem_to_nv,CD4mem_to_nv_win),
+                 CD8mem_to_nv = ifelse(CD8mem_to_nv <= CD8mem_to_nv_win,
+                                       CD8mem_to_nv,CD8mem_to_nv_win),
+                 Tmem_to_nv = ifelse(Tmem_to_nv <= Tmem_to_nv_win,
+                                     Tmem_to_nv,Tmem_to_nv_win)) %>% 
+         mutate(NLR_cut = cut(NLR, breaks = c(quantile(NLR,probs=seq(0,1, by = 0.25)))))
+phenotype4$NLR_cut[which(is.na(phenotype4$NLR_cut) == T)] <- '(0.225,1.62]'
+```
+
+# All patients
+```{r}
+AllBC_noWin = phenotype3 %>% 
+              mutate(Age = refage,TumorGrade = grade2,MuscleInvasive = muscinv,
+                     SmokingStat = smkstat2, BCGtrt = ImmunoTx) %>%
+              select(-refage,-grade2,-smkstat2,-muscinv,-ImmunoTx,-Sample_Name,-Death,
+                     -survreftmd,-Outcome,-OutcomeTime,-SurgToBlood3,-TenRFS,
+                     -Lymph2,-CD8T2,-CD4nv2,-CD8nv2)
+
+write.csv(AllBC_noWin, file = "/Users/chenjiqing/Public/bladder cancer/ML used/AllBC_10OS_NoWin.csv",row.names = F)
+
+AllBC <- phenotype4 %>% select(refage,sex,grade2,muscinv,smkstat2,ImmunoTx,Bas2,Bmem2,Bnv2,CD4mem2,CD4nv2,CD8mem2,CD8nv2,Eos2,Mono2,Neu2,NK2,Treg2,CD4,CD8,Bcell,NLR,SurgToBlood,survreftmd,Death,OutcomeTime,Outcome,TenDead,TenRFS)
+colnames(AllBC) <- c("Age","Sex","TumorGrade","MuscleInvasive","SmokingStat","BCGtrt","Bas","Bmem","Bnv","CD4mem","CD4nv","CD8mem","CD8nv","Eos","Mono","Neu","NK","Treg","CD4","CD8","Bcell","NLR","SurgToBlood","survreftmd","Death","OutcomeTime","Outcome","TenDead","TenRFS")
+
+AllBC <- AllBC %>% mutate(SurgToBlood_std = scale(SurgToBlood))
+
+#write.csv(AllBC, file = "/Users/chenjiqing/Public/bladder cancer/ML used/AllBC_Nolimit10year.csv",row.names = F)
+
+# standardize
+AllBC2 <- AllBC %>% mutate(Bas = scale(Bas),Bmem=scale(Bmem),
+                           Bnv = scale(Bnv),CD4mem=scale(CD4mem),
+                           CD4nv = scale(CD4nv),CD8mem=scale(CD8mem),
+                           CD8nv = scale(CD8nv),Eos=scale(Eos),
+                           Mono = scale(Mono),Neu=scale(Neu),
+                           NK = scale(NK),Treg=scale(Treg),
+                           CD4 = scale(CD4),CD8=scale(CD8),
+                           Bcell = scale(Bcell),NLR = scale(NLR))
+#write.csv(AllBC2, file = "/Users/chenjiqing/Public/bladder cancer/ML used/AllBC_Nolimit10year_withStd.csv",row.names = F)
+```
+
+# NMIBC
+```{r}
+NMIBC <- AllBC %>% filter(MuscleInvasive=="no") %>% select(-MuscleInvasive)
+#write.csv(NMIBC, file = "/Users/chenjiqing/Public/bladder cancer/ML used/NMIBC_Nolimit10year.csv",row.names = F)
+
+NMIBC2 <- AllBC2 %>% filter(MuscleInvasive=="no") %>% select(-MuscleInvasive)
+#write.csv(NMIBC2, file = "/Users/chenjiqing/Public/bladder cancer/ML used/NMIBC_Nolimit10year_withStd.csv",row.names = F)
+```
+
